@@ -177,14 +177,6 @@ public class App : ApplicationContext
             await Task.Delay(20);
         }
 
-        // Send Escape to dismiss any menu bar that Alt may have activated.
-        var escInputs = new[]
-        {
-            NativeMethods.CreateKeyInput((ushort)Keys.Escape, false),
-            NativeMethods.CreateKeyInput((ushort)Keys.Escape, true),
-        };
-        NativeMethods.SendInput((uint)escInputs.Length, escInputs, cbSize);
-
         // Set clipboard to the path text, then send Ctrl+V to paste.
         Clipboard.SetText(text);
 
