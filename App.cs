@@ -9,11 +9,23 @@ public class App : ApplicationContext
 {
     private readonly NotifyIcon _trayIcon;
     private Settings _settings;
-    private readonly HotkeyWindow _hotkeyWindow;
     private readonly List<string> _savedFiles = new();
+    private readonly SynchronizationContext _syncContext;
+
+    // Low-level keyboard hook — must be stored as a field to prevent GC.
+    private readonly NativeMethods.LowLevelKeyboardProc _hookProc;
+    private IntPtr _hookId;
+    private bool _hotkeyHandled;
+
 
     public App()
     {
+        // Ensure a WinForms sync context exists before the message loop starts.
+        WindowsFormsSynchronizationContext.AutoInstall = true;
+        if (SynchronizationContext.Current == null)
+            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+        _syncContext = SynchronizationContext.Current!;
+
         _settings = Settings.Load();
 
         Directory.CreateDirectory(_settings.ImageSavePath);
@@ -28,13 +40,13 @@ public class App : ApplicationContext
         };
         _trayIcon.DoubleClick += (_, _) => OpenSettings();
 
-        _hotkeyWindow = new HotkeyWindow();
-        _hotkeyWindow.HotkeyPressed += OnHotkeyPressed;
+        _hookProc = HookCallback;
+        _hookId = InstallHook();
 
-        if (!RegisterHotkey())
+        if (_hookId == IntPtr.Zero)
         {
             _trayIcon.ShowBalloonTip(3000, "WSL Paste Image",
-                $"Failed to register hotkey {_settings.FormatHotkey()}. It may be in use by another application.",
+                "Failed to install keyboard hook.",
                 ToolTipIcon.Error);
         }
         else
@@ -45,35 +57,88 @@ public class App : ApplicationContext
         }
     }
 
-    private bool RegisterHotkey()
+    private IntPtr InstallHook()
     {
-        return NativeMethods.RegisterHotKey(
-            _hotkeyWindow.Handle,
-            NativeMethods.HOTKEY_ID,
-            _settings.GetWin32Modifiers(),
-            (uint)_settings.HotkeyKey);
+        using var process = Process.GetCurrentProcess();
+        using var module = process.MainModule!;
+        return NativeMethods.SetWindowsHookEx(
+            NativeMethods.WH_KEYBOARD_LL,
+            _hookProc,
+            NativeMethods.GetModuleHandle(module.ModuleName),
+            0);
     }
 
-    private void UnregisterHotkey()
+    private void RemoveHook()
     {
-        NativeMethods.UnregisterHotKey(_hotkeyWindow.Handle, NativeMethods.HOTKEY_ID);
-    }
-
-    private void OnHotkeyPressed(object? sender, EventArgs e)
-    {
-        if (_settings.WindowsTerminalOnly && !IsWindowsTerminalFocused())
-            return;
-
-        if (!Clipboard.ContainsImage())
+        if (_hookId != IntPtr.Zero)
         {
-            _trayIcon.ShowBalloonTip(1500, "WSL Paste Image",
-                "No image found on clipboard.", ToolTipIcon.Info);
-            return;
+            NativeMethods.UnhookWindowsHookEx(_hookId);
+            _hookId = IntPtr.Zero;
         }
+    }
 
+    private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
         try
         {
+            if (nCode >= 0)
+            {
+                var msg = wParam.ToInt32();
+                var hookStruct = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
+                var vk = (Keys)hookStruct.vkCode;
+
+                if (msg is NativeMethods.WM_KEYDOWN or NativeMethods.WM_SYSKEYDOWN)
+                {
+                    if (!_hotkeyHandled && vk == _settings.HotkeyKey && ModifiersMatch())
+                    {
+                        bool shouldHandle = !_settings.WindowsTerminalOnly || IsWslTerminalFocused();
+
+                        if (shouldHandle)
+                        {
+                            _hotkeyHandled = true;
+                            _syncContext.Post(_ => OnHotkeyTriggered(), null);
+                            return (IntPtr)1;
+                        }
+                    }
+                }
+                else if (msg is NativeMethods.WM_KEYUP or NativeMethods.WM_SYSKEYUP)
+                {
+                    if (vk == _settings.HotkeyKey)
+                    {
+                        _hotkeyHandled = false;
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
+    }
+
+    private bool ModifiersMatch()
+    {
+        return NativeMethods.IsKeyDown(Keys.Menu) == _settings.HotkeyAlt
+            && NativeMethods.IsKeyDown(Keys.ControlKey) == _settings.HotkeyCtrl
+            && NativeMethods.IsKeyDown(Keys.ShiftKey) == _settings.HotkeyShift;
+    }
+
+    private void OnHotkeyTriggered()
+    {
+        try
+        {
+
+            if (!Clipboard.ContainsImage())
+            {
+
+                _trayIcon.ShowBalloonTip(1500, "WSL Paste Image",
+                    "No image found on clipboard.", ToolTipIcon.Info);
+                return;
+            }
+
             var image = Clipboard.GetImage();
+
             if (image == null) return;
 
             Directory.CreateDirectory(_settings.ImageSavePath);
@@ -87,10 +152,12 @@ public class App : ApplicationContext
             _savedFiles.Add(filePath);
 
             var wslPath = _settings.ToWslPath(filePath);
+
             PastePath(wslPath, image);
         }
         catch (Exception ex)
         {
+
             _trayIcon.ShowBalloonTip(3000, "WSL Paste Image",
                 $"Error: {ex.Message}", ToolTipIcon.Error);
         }
@@ -144,7 +211,7 @@ public class App : ApplicationContext
         }
     }
 
-    private static bool IsWindowsTerminalFocused()
+    private static bool IsWslTerminalFocused()
     {
         var hwnd = NativeMethods.GetForegroundWindow();
         NativeMethods.GetWindowThreadProcessId(hwnd, out uint processId);
@@ -152,7 +219,21 @@ public class App : ApplicationContext
         {
             var process = Process.GetProcessById((int)processId);
             var name = process.ProcessName.ToLowerInvariant();
-            return name is "windowsterminal" or "wt";
+            if (name is not ("windowsterminal" or "wt"))
+                return false;
+
+            var sb = new System.Text.StringBuilder(512);
+            NativeMethods.GetWindowText(hwnd, sb, sb.Capacity);
+            var title = sb.ToString().ToLowerInvariant();
+
+            string[] nonWslIndicators = ["powershell", "pwsh", "cmd.exe", "command prompt", "developer command"];
+            foreach (var indicator in nonWslIndicators)
+            {
+                if (title.Contains(indicator))
+                    return false;
+            }
+
+            return true;
         }
         catch
         {
@@ -181,16 +262,17 @@ public class App : ApplicationContext
         using var form = new SettingsForm(_settings);
         if (form.ShowDialog() == DialogResult.OK)
         {
-            UnregisterHotkey();
+            RemoveHook();
             _settings = form.UpdatedSettings;
             _settings.Save();
 
             _trayIcon.Text = $"WSL Paste Image ({_settings.FormatHotkey()})";
 
-            if (!RegisterHotkey())
+            _hookId = InstallHook();
+            if (_hookId == IntPtr.Zero)
             {
                 _trayIcon.ShowBalloonTip(3000, "WSL Paste Image",
-                    $"Failed to register hotkey {_settings.FormatHotkey()}.",
+                    "Failed to install keyboard hook.",
                     ToolTipIcon.Error);
             }
         }
@@ -198,11 +280,10 @@ public class App : ApplicationContext
 
     private void ExitApp()
     {
-        UnregisterHotkey();
+        RemoveHook();
         CleanupSessionFiles();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
-        _hotkeyWindow.DestroyHandle();
         Application.Exit();
     }
 
@@ -235,15 +316,12 @@ public class App : ApplicationContext
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.Clear(Color.Transparent);
 
-        // Clipboard body
         using var clipBrush = new SolidBrush(Color.FromArgb(70, 130, 180));
         g.FillRoundedRectangle(clipBrush, 4, 6, 24, 24, 3);
 
-        // Clipboard clip
         using var clipPen = new Pen(Color.FromArgb(70, 130, 180), 2.5f);
         g.DrawRoundedRectangle(clipPen, 10, 2, 12, 7, 2);
 
-        // Image icon (mountain/sun)
         using var pageBrush = new SolidBrush(Color.White);
         g.FillRectangle(pageBrush, 8, 12, 16, 14);
 
@@ -263,29 +341,11 @@ public class App : ApplicationContext
     {
         if (disposing)
         {
+            RemoveHook();
             CleanupSessionFiles();
             _trayIcon.Dispose();
         }
         base.Dispose(disposing);
-    }
-
-    private class HotkeyWindow : NativeWindow
-    {
-        public event EventHandler? HotkeyPressed;
-
-        public HotkeyWindow()
-        {
-            CreateHandle(new CreateParams());
-        }
-
-        protected override void WndProc(ref Message m)
-        {
-            if (m.Msg == NativeMethods.WM_HOTKEY && m.WParam.ToInt32() == NativeMethods.HOTKEY_ID)
-            {
-                HotkeyPressed?.Invoke(this, EventArgs.Empty);
-            }
-            base.WndProc(ref m);
-        }
     }
 }
 

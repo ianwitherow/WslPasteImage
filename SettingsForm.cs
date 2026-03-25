@@ -104,7 +104,7 @@ public class SettingsForm : Form
 
         _terminalOnlyCheckBox = new CheckBox
         {
-            Text = "Only activate when Windows Terminal is focused",
+            Text = "Only activate in WSL terminal sessions",
             Checked = current.WindowsTerminalOnly,
             AutoSize = true,
             Location = new Point(12, 25)

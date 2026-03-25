@@ -48,15 +48,6 @@ public class Settings
         ApplyStartWithWindows();
     }
 
-    public uint GetWin32Modifiers()
-    {
-        uint mods = NativeMethods.MOD_NOREPEAT;
-        if (HotkeyAlt) mods |= NativeMethods.MOD_ALT;
-        if (HotkeyCtrl) mods |= NativeMethods.MOD_CONTROL;
-        if (HotkeyShift) mods |= NativeMethods.MOD_SHIFT;
-        return mods;
-    }
-
     public string FormatHotkey()
     {
         var parts = new List<string>();
