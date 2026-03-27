@@ -8,7 +8,7 @@ public class SettingsForm : Form
     private readonly CheckBox _ctrlCheckBox;
     private readonly CheckBox _shiftCheckBox;
     private readonly CheckBox _startWithWindowsCheckBox;
-    private readonly CheckBox _terminalOnlyCheckBox;
+    private readonly Label _hotkeyWarning;
     private Keys _capturedKey;
 
     public Settings UpdatedSettings { get; private set; }
@@ -23,7 +23,7 @@ public class SettingsForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        Size = new Size(460, 380);
+        Size = new Size(460, 370);
         Padding = new Padding(12);
 
         // --- Image Storage ---
@@ -63,13 +63,17 @@ public class SettingsForm : Form
         {
             Text = "Keyboard Shortcut",
             Dock = DockStyle.Top,
-            Height = 110,
+            Height = 130,
             Padding = new Padding(8)
         };
 
         _ctrlCheckBox = new CheckBox { Text = "Ctrl", Checked = current.HotkeyCtrl, Location = new Point(12, 25), AutoSize = true };
         _altCheckBox = new CheckBox { Text = "Alt", Checked = current.HotkeyAlt, Location = new Point(72, 25), AutoSize = true };
         _shiftCheckBox = new CheckBox { Text = "Shift", Checked = current.HotkeyShift, Location = new Point(125, 25), AutoSize = true };
+
+        _ctrlCheckBox.CheckedChanged += (_, _) => UpdateHotkeyWarning();
+        _altCheckBox.CheckedChanged += (_, _) => UpdateHotkeyWarning();
+        _shiftCheckBox.CheckedChanged += (_, _) => UpdateHotkeyWarning();
 
         var keyLabel = new Label { Text = "Key:", AutoSize = true, Location = new Point(12, 58) };
         _hotkeyTextBox = new TextBox
@@ -91,33 +95,37 @@ public class SettingsForm : Form
             Font = new Font(Font.FontFamily, 8)
         };
 
-        hotkeyGroup.Controls.AddRange([_ctrlCheckBox, _altCheckBox, _shiftCheckBox, keyLabel, _hotkeyTextBox, hotkeyHint]);
+        _hotkeyWarning = new Label
+        {
+            Text = "Alt+V will override native image paste in non-WSL terminals (e.g. PowerShell)",
+            Location = new Point(12, 102),
+            AutoSize = true,
+            ForeColor = Color.OrangeRed,
+            Font = new Font(Font.FontFamily, 8),
+            Visible = false
+        };
+
+        hotkeyGroup.Controls.AddRange([_ctrlCheckBox, _altCheckBox, _shiftCheckBox,
+            keyLabel, _hotkeyTextBox, hotkeyHint, _hotkeyWarning]);
 
         // --- Options ---
         var optionsGroup = new GroupBox
         {
             Text = "Options",
             Dock = DockStyle.Top,
-            Height = 75,
+            Height = 55,
             Padding = new Padding(8)
         };
 
-        _terminalOnlyCheckBox = new CheckBox
-        {
-            Text = "Only activate in WSL terminal sessions",
-            Checked = current.WindowsTerminalOnly,
-            AutoSize = true,
-            Location = new Point(12, 25)
-        };
         _startWithWindowsCheckBox = new CheckBox
         {
             Text = "Start with Windows",
             Checked = current.StartWithWindows,
             AutoSize = true,
-            Location = new Point(12, 48)
+            Location = new Point(12, 25)
         };
 
-        optionsGroup.Controls.AddRange([_terminalOnlyCheckBox, _startWithWindowsCheckBox]);
+        optionsGroup.Controls.Add(_startWithWindowsCheckBox);
 
         // --- Buttons ---
         var buttonPanel = new FlowLayoutPanel
@@ -137,21 +145,31 @@ public class SettingsForm : Form
         AcceptButton = saveBtn;
         CancelButton = cancelBtn;
 
-        // Add controls in reverse dock order
         Controls.AddRange([optionsGroup, hotkeyGroup, pathGroup, buttonPanel]);
 
-        // Re-order for proper top-down docking
         Controls.SetChildIndex(pathGroup, 0);
         Controls.SetChildIndex(hotkeyGroup, 1);
         Controls.SetChildIndex(optionsGroup, 2);
         Controls.SetChildIndex(buttonPanel, 3);
+
+        UpdateHotkeyWarning();
+    }
+
+    private void UpdateHotkeyWarning()
+    {
+        // Show warning if the hotkey is Alt+V without Shift or Ctrl,
+        // since that conflicts with native image paste in non-WSL terminals.
+        bool isAltV = _altCheckBox.Checked
+            && !_ctrlCheckBox.Checked
+            && !_shiftCheckBox.Checked
+            && _capturedKey == Keys.V;
+        _hotkeyWarning.Visible = isAltV;
     }
 
     private void HotkeyTextBox_KeyDown(object? sender, KeyEventArgs e)
     {
         e.SuppressKeyPress = true;
 
-        // Ignore modifier-only presses
         if (e.KeyCode is Keys.ControlKey or Keys.ShiftKey or Keys.Menu
             or Keys.LWin or Keys.RWin or Keys.LMenu or Keys.RMenu
             or Keys.LControlKey or Keys.RControlKey or Keys.LShiftKey or Keys.RShiftKey)
@@ -160,10 +178,11 @@ public class SettingsForm : Form
         _capturedKey = e.KeyCode;
         _hotkeyTextBox.Text = e.KeyCode.ToString();
 
-        // Auto-set modifier checkboxes to match what was pressed
         _altCheckBox.Checked = e.Alt;
         _ctrlCheckBox.Checked = e.Control;
         _shiftCheckBox.Checked = e.Shift;
+
+        UpdateHotkeyWarning();
     }
 
     private void SaveBtn_Click(object? sender, EventArgs e)
@@ -188,8 +207,7 @@ public class SettingsForm : Form
             HotkeyAlt = _altCheckBox.Checked,
             HotkeyCtrl = _ctrlCheckBox.Checked,
             HotkeyShift = _shiftCheckBox.Checked,
-            StartWithWindows = _startWithWindowsCheckBox.Checked,
-            WindowsTerminalOnly = _terminalOnlyCheckBox.Checked
+            StartWithWindows = _startWithWindowsCheckBox.Checked
         };
 
         DialogResult = DialogResult.OK;

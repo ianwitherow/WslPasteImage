@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Win32;
@@ -13,9 +14,8 @@ public class Settings
 
     public bool HotkeyAlt { get; set; } = true;
     public bool HotkeyCtrl { get; set; } = false;
-    public bool HotkeyShift { get; set; } = false;
+    public bool HotkeyShift { get; set; } = true;
     public bool StartWithWindows { get; set; } = false;
-    public bool WindowsTerminalOnly { get; set; } = false;
 
     private static string SettingsDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),

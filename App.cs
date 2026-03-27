@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace WslPasteImage;
@@ -16,7 +17,6 @@ public class App : ApplicationContext
     private readonly NativeMethods.LowLevelKeyboardProc _hookProc;
     private IntPtr _hookId;
     private bool _hotkeyHandled;
-
 
     public App()
     {
@@ -91,14 +91,9 @@ public class App : ApplicationContext
                 {
                     if (!_hotkeyHandled && vk == _settings.HotkeyKey && ModifiersMatch())
                     {
-                        bool shouldHandle = !_settings.WindowsTerminalOnly || IsWslTerminalFocused();
-
-                        if (shouldHandle)
-                        {
-                            _hotkeyHandled = true;
-                            _syncContext.Post(_ => OnHotkeyTriggered(), null);
-                            return (IntPtr)1;
-                        }
+                        _hotkeyHandled = true;
+                        _syncContext.Post(_ => OnHotkeyTriggered(), null);
+                        return (IntPtr)1;
                     }
                 }
                 else if (msg is NativeMethods.WM_KEYUP or NativeMethods.WM_SYSKEYUP)
@@ -110,9 +105,7 @@ public class App : ApplicationContext
                 }
             }
         }
-        catch
-        {
-        }
+        catch { }
 
         return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
     }
@@ -128,17 +121,14 @@ public class App : ApplicationContext
     {
         try
         {
-
             if (!Clipboard.ContainsImage())
             {
-
                 _trayIcon.ShowBalloonTip(1500, "WSL Paste Image",
                     "No image found on clipboard.", ToolTipIcon.Info);
                 return;
             }
 
             var image = Clipboard.GetImage();
-
             if (image == null) return;
 
             Directory.CreateDirectory(_settings.ImageSavePath);
@@ -152,12 +142,10 @@ public class App : ApplicationContext
             _savedFiles.Add(filePath);
 
             var wslPath = _settings.ToWslPath(filePath);
-
             PastePath(wslPath, image);
         }
         catch (Exception ex)
         {
-
             _trayIcon.ShowBalloonTip(3000, "WSL Paste Image",
                 $"Error: {ex.Message}", ToolTipIcon.Error);
         }
@@ -190,6 +178,16 @@ public class App : ApplicationContext
 
         NativeMethods.SendInput((uint)pasteInputs.Length, pasteInputs, cbSize);
 
+        // Send a trailing space as a separate keystroke (terminals strip
+        // trailing whitespace from pasted text, but accept typed spaces).
+        await Task.Delay(200);
+        var spaceInputs = new[]
+        {
+            NativeMethods.CreateKeyInput((ushort)Keys.Space, false),
+            NativeMethods.CreateKeyInput((ushort)Keys.Space, true),
+        };
+        NativeMethods.SendInput((uint)spaceInputs.Length, spaceInputs, cbSize);
+
         // Restore the original image to the clipboard
         await Task.Delay(200);
         try
@@ -200,36 +198,6 @@ public class App : ApplicationContext
         finally
         {
             originalImage.Dispose();
-        }
-    }
-
-    private static bool IsWslTerminalFocused()
-    {
-        var hwnd = NativeMethods.GetForegroundWindow();
-        NativeMethods.GetWindowThreadProcessId(hwnd, out uint processId);
-        try
-        {
-            var process = Process.GetProcessById((int)processId);
-            var name = process.ProcessName.ToLowerInvariant();
-            if (name is not ("windowsterminal" or "wt"))
-                return false;
-
-            var sb = new System.Text.StringBuilder(512);
-            NativeMethods.GetWindowText(hwnd, sb, sb.Capacity);
-            var title = sb.ToString().ToLowerInvariant();
-
-            string[] nonWslIndicators = ["powershell", "pwsh", "cmd.exe", "command prompt", "developer command"];
-            foreach (var indicator in nonWslIndicators)
-            {
-                if (title.Contains(indicator))
-                    return false;
-            }
-
-            return true;
-        }
-        catch
-        {
-            return false;
         }
     }
 
